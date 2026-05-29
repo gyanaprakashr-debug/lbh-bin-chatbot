@@ -3,12 +3,30 @@ import math
 import re
 import os
 import base64
+from datetime import datetime
 
 # Set page config
 st.set_page_config(page_title="LBH Bin Chatbot", page_icon="📦", layout="centered")
 
-# Path updated for Cloud Deployment (Both files must be in the same GitHub folder)
-LOGO_PATH = "L&D Logo.png"
+# --- Bulletproof Path Resolution ---
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# The script will now check every possible name Windows or GitHub might have given your file (including case sensitivity for Cloud Linux)
+POSSIBLE_LOGOS = [
+    r"C:\Users\gyanaprakash.r\Desktop\L&D Logo.png", # Your original desktop path
+    os.path.join(SCRIPT_DIR, "logo.png"),            # Standard lowercase (Best for Cloud)
+    os.path.join(SCRIPT_DIR, "Logo.png"),            # Capitalized
+    os.path.join(SCRIPT_DIR, "LOGO.png"),            # All caps
+    os.path.join(SCRIPT_DIR, "logo"),                # If Windows removed the extension
+    os.path.join(SCRIPT_DIR, "logo.png.png"),        # If Windows duplicated the extension
+    os.path.join(SCRIPT_DIR, "L&D Logo.png")         # Original name in the local folder
+]
+
+LOGO_PATH = None
+for path in POSSIBLE_LOGOS:
+    if os.path.exists(path):
+        LOGO_PATH = path
+        break
 
 # Default Sample CSV Data (Fallback)
 INITIAL_CSV = """Outlier FSN as per system,Priority,WID ( collected ),L (cm),B (cm),H (cm),W (kg),Vertical,Volume(cc cm),Date of update
@@ -106,67 +124,134 @@ def calculate_max_fit(item, bin_dims, num_fsns=1):
     
     return allocated_qty, best_orientation
 
+# --- Initialize Global Memory (Session State) ---
+# This ensures data persists even when swapping between Admin and User modes
+if "inventory" not in st.session_state:
+    st.session_state.inventory = parse_csv(INITIAL_CSV)
+if "bin_dims" not in st.session_state:
+    st.session_state.bin_dims = {"l": 35.0, "b": 42.0, "h": 29.0}
+if "num_fsns" not in st.session_state:
+    st.session_state.num_fsns = 1
+if "current_user" not in st.session_state:
+    st.session_state.current_user = ""
+    
+# Track all searches for analytics log (Added Searched_By column)
+if "search_logs" not in st.session_state:
+    st.session_state.search_logs = [["Timestamp", "Searched_By", "Searched_FSN", "Status", "Max_Quantity"]]
+
 # --- UI Setup ---
 
-# Sidebar for Settings
+# Sidebar for Settings & Access Control
 with st.sidebar:
     # Add Logo to Sidebar
-    if os.path.exists(LOGO_PATH):
+    if LOGO_PATH and os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, use_container_width=True)
         st.markdown("---")
     else:
-        st.warning(f"⚠️ Logo not found!\nPlease make sure `{LOGO_PATH}` is uploaded alongside your app.py file.")
+        st.warning(f"⚠️ Logo not found!\nMake sure your image file is in this exact folder on GitHub:\n\n`{SCRIPT_DIR}`")
         st.markdown("---")
         
-    st.header("⚙️ Settings")
-    st.subheader("Bin Dimensions (cm)")
-    
-    col1, col2, col3 = st.columns(3)
-    bin_l = col1.number_input("Length", min_value=1.0, value=35.0, step=1.0)
-    bin_b = col2.number_input("Breadth", min_value=1.0, value=42.0, step=1.0)
-    bin_h = col3.number_input("Height", min_value=1.0, value=29.0, step=1.0)
-    bin_dims = {"l": bin_l, "b": bin_b, "h": bin_h}
-    
+    st.header("👤 User Identification")
+    st.session_state.current_user = st.text_input("Enter your Name / ID:", value=st.session_state.current_user, placeholder="e.g., Gyana or ID12345")
     st.markdown("---")
-    st.subheader("Mixed Packing Configuration")
-    num_fsns = st.number_input(
-        "No. of FSNs sharing the bin", 
-        min_value=1, 
-        value=1, 
-        step=1,
-        help="If you plan to mix multiple FSNs in one bin, this divides the total volume capacity fairly among them."
-    )
-    
-    st.markdown("---")
-    st.subheader("Database Upload")
-    
-    # NEW: File Uploader instead of text area
-    uploaded_file = st.file_uploader("Upload Master LBH (CSV file)", type=["csv"])
 
-    # ADDED COPYRIGHT
+    # Access Level Toggle
+    role = st.radio("Select Role:", ["End User", "Admin"])
+    st.markdown("---")
+    
+    if role == "Admin":
+        st.header("🔐 Admin Login")
+        # Hardcoded password: admin123
+        admin_pass = st.text_input("Enter Admin Password", type="password")
+        
+        if admin_pass == "admin123":
+            st.success("Admin mode unlocked!")
+            st.markdown("---")
+            
+            st.header("⚙️ Configuration Settings")
+            st.subheader("Bin Dimensions (cm)")
+            
+            col1, col2, col3 = st.columns(3)
+            bin_l = col1.number_input("Length", min_value=1.0, value=st.session_state.bin_dims["l"], step=1.0)
+            bin_b = col2.number_input("Breadth", min_value=1.0, value=st.session_state.bin_dims["b"], step=1.0)
+            bin_h = col3.number_input("Height", min_value=1.0, value=st.session_state.bin_dims["h"], step=1.0)
+            
+            # Save to global memory
+            st.session_state.bin_dims = {"l": bin_l, "b": bin_b, "h": bin_h}
+            
+            st.markdown("---")
+            st.subheader("Mixed Packing Configuration")
+            st.session_state.num_fsns = st.number_input(
+                "No. of FSNs sharing the bin", 
+                min_value=1, 
+                value=st.session_state.num_fsns, 
+                step=1,
+                help="If you plan to mix multiple FSNs in one bin, this divides the total volume capacity fairly among them."
+            )
+            
+            st.markdown("---")
+            st.subheader("Database Management")
+            
+            # File Uploader
+            uploaded_file = st.file_uploader("Upload Master LBH (CSV file)", type=["csv"])
+            
+            if uploaded_file is not None:
+                try:
+                    csv_string = uploaded_file.getvalue().decode("utf-8")
+                    st.session_state.inventory = parse_csv(csv_string)
+                    st.success(f"✅ Successfully loaded {len(st.session_state.inventory)} items from uploaded file!")
+                except Exception as e:
+                    st.error("❌ Error reading file. Please ensure it is a valid CSV.")
+            else:
+                st.info(f"Currently tracking {len(st.session_state.inventory)} FSNs in memory.")
+                
+            # Analytics Export
+            st.markdown("---")
+            st.subheader("Search Logs (Analytics)")
+            
+            # -1 to exclude the header row from the count
+            search_count = len(st.session_state.search_logs) - 1
+            st.info(f"Total FSNs searched this session: **{search_count}**")
+            
+            # Convert list of lists to CSV string format
+            csv_log_data = "\n".join([",".join(row) for row in st.session_state.search_logs])
+            
+            st.download_button(
+                label="📊 Download Search Logs",
+                data=csv_log_data,
+                file_name="fsn_search_logs.csv",
+                mime="text/csv",
+                help="Download a log of all FSNs that users have searched during this session."
+            )
+
+            # Download CSV Template
+            st.markdown("---")
+            st.subheader("Download Files")
+            st.download_button(
+                label="📥 Download LBH Template",
+                data=INITIAL_CSV,
+                file_name="LBH_Master_Template.csv",
+                mime="text/csv",
+                help="Download the default format to fill in your own data."
+            )
+            
+        elif admin_pass != "":
+            st.error("Incorrect password.")
+            
+    else:
+        # END USER MODE - Clean Interface
+        st.info("👤 **End User Mode Active**\n\nThe configuration settings are locked. You can safely chat and calculate quantities.")
+
+    # ADDED COPYRIGHT (Visible to everyone)
     st.markdown("---")
     st.markdown("<div style='text-align: center; color: gray; font-size: 13px; font-weight: bold;'>build by Gyana Prakash Rout</div>", unsafe_allow_html=True)
-
-# Determine which data to use
-if uploaded_file is not None:
-    try:
-        # Read the uploaded file as text
-        csv_string = uploaded_file.getvalue().decode("utf-8")
-        inventory = parse_csv(csv_string)
-        st.sidebar.success(f"✅ Successfully loaded {len(inventory)} items from file!")
-    except Exception as e:
-        st.sidebar.error("❌ Error reading file. Please ensure it is a valid CSV.")
-        inventory = parse_csv(INITIAL_CSV) # Fallback if file is corrupted
-else:
-    st.sidebar.info("ℹ️ Using default sample data. Upload your CSV to check real FSNs.")
-    inventory = parse_csv(INITIAL_CSV)
 
 
 # --- Main Chat Interface - Sticky Constant Header ---
 
 # Generate base64 encoding for the local image to embed directly in HTML
 encoded_logo = ""
-if os.path.exists(LOGO_PATH):
+if LOGO_PATH and os.path.exists(LOGO_PATH):
     try:
         with open(LOGO_PATH, "rb") as image_file:
             encoded_logo = base64.b64encode(image_file.read()).decode()
@@ -200,12 +285,12 @@ header_html = f"""
 if encoded_logo:
     header_html += f'<img src="data:image/png;base64,{encoded_logo}" style="max-height: 80px; margin-bottom: 10px;"><br>'
 
-# Welcome message and dynamic configuration specs
+# Welcome message and dynamic configuration specs pulling from Global Memory
 header_html += '<h2 style="margin: 0; padding: 0;">📦 Welcome to LBH Bin Chatbot</h2>'
 
-config_text = f"Bin Size: {bin_l}x{bin_b}x{bin_h} cm"
-if num_fsns > 1:
-    config_text += f" | Mixed Mode: {num_fsns} FSNs/Bin"
+config_text = f"Bin Size: {st.session_state.bin_dims['l']}x{st.session_state.bin_dims['b']}x{st.session_state.bin_dims['h']} cm"
+if st.session_state.num_fsns > 1:
+    config_text += f" | Mixed Mode: {st.session_state.num_fsns} FSNs/Bin"
 
 header_html += f'<p style="color: gray; margin-top: 5px; font-size: 14px;">{config_text}</p>'
 header_html += '</div>'
@@ -216,7 +301,7 @@ st.markdown(header_html, unsafe_allow_html=True)
 
 # Initialize chat history
 if "messages" not in st.session_state:
-    welcome_msg = f"👋 Hello! I am your **LBH Bin Chatbot**.\n\nI currently have **{len(inventory)}** products loaded in my memory.\n\nSend me an **FSN** (e.g., `EDOGTYMYKZDUGZDX`) or multiple FSNs separated by commas, and I'll compute the maximum quantity that can be placed in your bin."
+    welcome_msg = f"👋 Hello! I am your **LBH Bin Chatbot**.\n\nI currently have **{len(st.session_state.inventory)}** products loaded in my memory.\n\nSend me an **FSN** (e.g., `EDOGTYMYKZDUGZDX`) or multiple FSNs separated by commas, and I'll compute the maximum quantity that can be placed in your bin."
     st.session_state.messages = [{"role": "assistant", "content": welcome_msg}]
 
 # Display chat messages from history on app rerun
@@ -237,24 +322,34 @@ if prompt := st.chat_input("Type an FSN here..."):
     responses = []
     valid_checks = 0
     
+    # Grab the current user's name/ID, replace any commas with spaces so it doesn't break the CSV format
+    user_name = st.session_state.current_user.strip().replace(",", " ")
+    if not user_name:
+        user_name = "Anonymous"
+        
     for word in words:
         # AGGRESSIVE CLEANING: Strip absolutely everything except letters and numbers
         fsn = re.sub(r'[^A-Z0-9]', '', word.upper())
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         if len(fsn) >= 5:
             valid_checks += 1
-            if fsn in inventory:
-                item = inventory[fsn]
+            if fsn in st.session_state.inventory:
+                item = st.session_state.inventory[fsn]
                 
                 # Check if dimensions were missing
                 if not item.get("valid", True):
                     responses.append(f"⚠️ **{fsn}**: Found in database, but **dimensions (L, B, or H) are missing/blank** in your uploaded CSV!")
+                    st.session_state.search_logs.append([timestamp, user_name, fsn, "Missing Dimensions", "N/A"])
                     continue
                     
-                max_qty, best_ori = calculate_max_fit(item, bin_dims, num_fsns)
+                max_qty, best_ori = calculate_max_fit(item, st.session_state.bin_dims, st.session_state.num_fsns)
+                
+                # Log successful calculation
+                st.session_state.search_logs.append([timestamp, user_name, fsn, "Found & Calculated", str(max_qty)])
                 
                 # Dynamic label depending on mixed mode or standard mode
-                qty_label = "Allocated Fit Quantity (Mixed)" if num_fsns > 1 else "Max Fit Quantity"
+                qty_label = "Allocated Fit Quantity (Mixed)" if st.session_state.num_fsns > 1 else "Max Fit Quantity"
                 
                 if max_qty > 0:
                     best_l, best_b, best_h = best_ori
@@ -269,7 +364,9 @@ if prompt := st.chat_input("Type an FSN here..."):
                             f"*(Item is larger than the space allocated for it)*")
                 responses.append(resp)
             else:
-                responses.append(f"❌ **{fsn}**: Not found in the database. (Make sure you uploaded the latest CSV)")
+                responses.append(f"❌ **{fsn}**: Not found in the database. (Ask your Admin to upload the latest CSV)")
+                # Log missed FSN
+                st.session_state.search_logs.append([timestamp, user_name, fsn, "Not Found", "N/A"])
                 
     bot_response = "\n\n---\n\n".join(responses) if valid_checks > 0 else "Please send a valid FSN to check quantities."
 
