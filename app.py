@@ -124,20 +124,22 @@ def calculate_max_fit(item, bin_dims, num_fsns=1):
     
     return allocated_qty, best_orientation
 
-# --- Initialize Global Memory (Session State) ---
-# This ensures data persists even when swapping between Admin and User modes
-if "inventory" not in st.session_state:
-    st.session_state.inventory = parse_csv(INITIAL_CSV)
-if "bin_dims" not in st.session_state:
-    st.session_state.bin_dims = {"l": 35.0, "b": 42.0, "h": 29.0}
-if "num_fsns" not in st.session_state:
-    st.session_state.num_fsns = 1
+# --- Initialize Global Shared Memory ---
+# Using @st.cache_resource creates a single memory space shared across ALL devices!
+@st.cache_resource
+def get_global_state():
+    return {
+        "inventory": parse_csv(INITIAL_CSV),
+        "bin_dims": {"l": 35.0, "b": 42.0, "h": 29.0},
+        "num_fsns": 1,
+        "search_logs": [["Timestamp", "Searched_By", "Searched_FSN", "Status", "Max_Quantity"]]
+    }
+
+global_state = get_global_state()
+
+# User-specific memory (Not shared - keeps individual chat histories separate)
 if "current_user" not in st.session_state:
     st.session_state.current_user = ""
-    
-# Track all searches for analytics log (Added Searched_By column)
-if "search_logs" not in st.session_state:
-    st.session_state.search_logs = [["Timestamp", "Searched_By", "Searched_FSN", "Status", "Max_Quantity"]]
 
 # --- UI Setup ---
 
@@ -172,19 +174,19 @@ with st.sidebar:
             st.subheader("Bin Dimensions (cm)")
             
             col1, col2, col3 = st.columns(3)
-            bin_l = col1.number_input("Length", min_value=1.0, value=st.session_state.bin_dims["l"], step=1.0)
-            bin_b = col2.number_input("Breadth", min_value=1.0, value=st.session_state.bin_dims["b"], step=1.0)
-            bin_h = col3.number_input("Height", min_value=1.0, value=st.session_state.bin_dims["h"], step=1.0)
+            bin_l = col1.number_input("Length", min_value=1.0, value=global_state["bin_dims"]["l"], step=1.0)
+            bin_b = col2.number_input("Breadth", min_value=1.0, value=global_state["bin_dims"]["b"], step=1.0)
+            bin_h = col3.number_input("Height", min_value=1.0, value=global_state["bin_dims"]["h"], step=1.0)
             
-            # Save to global memory
-            st.session_state.bin_dims = {"l": bin_l, "b": bin_b, "h": bin_h}
+            # Save to global memory (Updates for everyone instantly)
+            global_state["bin_dims"] = {"l": bin_l, "b": bin_b, "h": bin_h}
             
             st.markdown("---")
             st.subheader("Mixed Packing Configuration")
-            st.session_state.num_fsns = st.number_input(
+            global_state["num_fsns"] = st.number_input(
                 "No. of FSNs sharing the bin", 
                 min_value=1, 
-                value=st.session_state.num_fsns, 
+                value=global_state["num_fsns"], 
                 step=1,
                 help="If you plan to mix multiple FSNs in one bin, this divides the total volume capacity fairly among them."
             )
@@ -198,23 +200,23 @@ with st.sidebar:
             if uploaded_file is not None:
                 try:
                     csv_string = uploaded_file.getvalue().decode("utf-8")
-                    st.session_state.inventory = parse_csv(csv_string)
-                    st.success(f"✅ Successfully loaded {len(st.session_state.inventory)} items from uploaded file!")
+                    global_state["inventory"] = parse_csv(csv_string)
+                    st.success(f"✅ Successfully loaded {len(global_state['inventory'])} items from uploaded file!")
                 except Exception as e:
                     st.error("❌ Error reading file. Please ensure it is a valid CSV.")
             else:
-                st.info(f"Currently tracking {len(st.session_state.inventory)} FSNs in memory.")
+                st.info(f"Currently tracking {len(global_state['inventory'])} FSNs in shared memory.")
                 
             # Analytics Export
             st.markdown("---")
             st.subheader("Search Logs (Analytics)")
             
             # -1 to exclude the header row from the count
-            search_count = len(st.session_state.search_logs) - 1
-            st.info(f"Total FSNs searched this session: **{search_count}**")
+            search_count = len(global_state["search_logs"]) - 1
+            st.info(f"Total FSNs searched across all devices: **{search_count}**")
             
             # Convert list of lists to CSV string format
-            csv_log_data = "\n".join([",".join(row) for row in st.session_state.search_logs])
+            csv_log_data = "\n".join([",".join(row) for row in global_state["search_logs"]])
             
             st.download_button(
                 label="📊 Download Search Logs",
@@ -288,9 +290,9 @@ if encoded_logo:
 # Welcome message and dynamic configuration specs pulling from Global Memory
 header_html += '<h2 style="margin: 0; padding: 0;">📦 Welcome to LBH Bin Chatbot</h2>'
 
-config_text = f"Bin Size: {st.session_state.bin_dims['l']}x{st.session_state.bin_dims['b']}x{st.session_state.bin_dims['h']} cm"
-if st.session_state.num_fsns > 1:
-    config_text += f" | Mixed Mode: {st.session_state.num_fsns} FSNs/Bin"
+config_text = f"Bin Size: {global_state['bin_dims']['l']}x{global_state['bin_dims']['b']}x{global_state['bin_dims']['h']} cm"
+if global_state['num_fsns'] > 1:
+    config_text += f" | Mixed Mode: {global_state['num_fsns']} FSNs/Bin"
 
 header_html += f'<p style="color: gray; margin-top: 5px; font-size: 14px;">{config_text}</p>'
 header_html += '</div>'
@@ -301,7 +303,7 @@ st.markdown(header_html, unsafe_allow_html=True)
 
 # Initialize chat history
 if "messages" not in st.session_state:
-    welcome_msg = f"👋 Hello! I am your **LBH Bin Chatbot**.\n\nI currently have **{len(st.session_state.inventory)}** products loaded in my memory.\n\nSend me an **FSN** (e.g., `EDOGTYMYKZDUGZDX`) or multiple FSNs separated by commas, and I'll compute the maximum quantity that can be placed in your bin."
+    welcome_msg = f"👋 Hello! I am your **LBH Bin Chatbot**.\n\nI currently have **{len(global_state['inventory'])}** products loaded in my memory.\n\nSend me an **FSN** (e.g., `EDOGTYMYKZDUGZDX`) or multiple FSNs separated by commas, and I'll compute the maximum quantity that can be placed in your bin."
     st.session_state.messages = [{"role": "assistant", "content": welcome_msg}]
 
 # Display chat messages from history on app rerun
@@ -334,22 +336,22 @@ if prompt := st.chat_input("Type an FSN here..."):
         
         if len(fsn) >= 5:
             valid_checks += 1
-            if fsn in st.session_state.inventory:
-                item = st.session_state.inventory[fsn]
+            if fsn in global_state["inventory"]:
+                item = global_state["inventory"][fsn]
                 
                 # Check if dimensions were missing
                 if not item.get("valid", True):
                     responses.append(f"⚠️ **{fsn}**: Found in database, but **dimensions (L, B, or H) are missing/blank** in your uploaded CSV!")
-                    st.session_state.search_logs.append([timestamp, user_name, fsn, "Missing Dimensions", "N/A"])
+                    global_state["search_logs"].append([timestamp, user_name, fsn, "Missing Dimensions", "N/A"])
                     continue
                     
-                max_qty, best_ori = calculate_max_fit(item, st.session_state.bin_dims, st.session_state.num_fsns)
+                max_qty, best_ori = calculate_max_fit(item, global_state["bin_dims"], global_state["num_fsns"])
                 
                 # Log successful calculation
-                st.session_state.search_logs.append([timestamp, user_name, fsn, "Found & Calculated", str(max_qty)])
+                global_state["search_logs"].append([timestamp, user_name, fsn, "Found & Calculated", str(max_qty)])
                 
                 # Dynamic label depending on mixed mode or standard mode
-                qty_label = "Allocated Fit Quantity (Mixed)" if st.session_state.num_fsns > 1 else "Max Fit Quantity"
+                qty_label = "Allocated Fit Quantity (Mixed)" if global_state["num_fsns"] > 1 else "Max Fit Quantity"
                 
                 if max_qty > 0:
                     best_l, best_b, best_h = best_ori
@@ -366,7 +368,7 @@ if prompt := st.chat_input("Type an FSN here..."):
             else:
                 responses.append(f"❌ **{fsn}**: Not found in the database. (Ask your Admin to upload the latest CSV)")
                 # Log missed FSN
-                st.session_state.search_logs.append([timestamp, user_name, fsn, "Not Found", "N/A"])
+                global_state["search_logs"].append([timestamp, user_name, fsn, "Not Found", "N/A"])
                 
     bot_response = "\n\n---\n\n".join(responses) if valid_checks > 0 else "Please send a valid FSN to check quantities."
 
